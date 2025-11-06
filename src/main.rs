@@ -12,6 +12,15 @@ use wmi::{WMIConnection, COMLibrary};
 // Telegram и асинхронность
 use teloxide::{Bot, types::{ChatId, InputFile}};
 
+// Криптография
+use aes_gcm::{
+    aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Nonce
+};
+use argon2::{Argon2, password_hash::{PasswordHasher, SaltString}};
+use base64::{Engine as _, engine::general_purpose};
+use rand::RngCore;
+
 // --- Структуры для WMI-ответов (только для Windows) ---
 
 #[cfg(target_os = "windows")]
@@ -131,6 +140,17 @@ struct MotherboardInfo {
     serial_number: String,
 }
 
+#[derive(Serialize, Debug, Clone)]
+struct DisplayInfo {
+    id: u32,
+    name: String,
+    width: u32,
+    height: u32,
+    refresh_rate: u32,
+    is_primary: bool,
+    rotation: u32,
+}
+
 #[derive(Serialize, Debug)]
 struct SystemReport {
     // Модуль 1: Базовая информация
@@ -185,6 +205,10 @@ struct SystemReport {
     installed_software: Vec<SoftwareInfo>,
     installed_software_count: usize,
 
+    // Модуль 7: Дисплеи
+    displays: Vec<DisplayInfo>,
+    display_count: usize,
+
     // Метаинформация
     report_generated_at: String,
     reporter_version: String,
@@ -195,18 +219,17 @@ struct SystemReport {
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("╔════════════════════════════════════════╗");
-    println!("║     System Reporter v0.2.0             ║");
+    println!("║     System Reporter v0.4.0             ║");
     println!("║     Полный сбор системной информации   ║");
     println!("╚════════════════════════════════════════╝\n");
 
     // Проверка переменных окружения
-    let telegram_mode = env::var("TELEGRAM_BOT_TOKEN").is_ok()
-                     && env::var("TELEGRAM_CHAT_ID").is_ok();
+    let telegram_mode = get_telegram_credentials().is_ok();
 
     if telegram_mode {
         println!("✓ Режим Telegram активирован");
     } else {
-        println!("ℹ Режим: локальное сохранение (для отправки в Telegram установите TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID)");
+        println!("ℹ Режим: локальное сохранение (для отправки в Telegram установите учетные данные)");
     }
 
     println!("\n[1/5] Инициализация системных библиотек...");
@@ -234,6 +257,7 @@ async fn main() -> Result<()> {
     println!("╠════════════════════════════════════════╣");
     println!("║ Процессов: {:>28} ║", report.process_count);
     println!("║ Дисков: {:>31} ║", report.disks.len());
+    println!("║ Дисплеев: {:>29} ║", report.display_count);
     println!("║ Сетевых интерфейсов: {:>18} ║", report.network_interfaces.len());
     #[cfg(target_os = "windows")]
     println!("║ GPU: {:>34} ║", report.gpus.len());
@@ -339,6 +363,10 @@ async fn collect_system_info() -> Result<SystemReport> {
             { get_installed_software_unix().len() }
         },
 
+        // Модуль 7
+        displays: get_displays_info(),
+        display_count: get_displays_info().len(),
+
         // Метаинформация
         report_generated_at: chrono::Local::now().to_rfc3339(),
         reporter_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -359,8 +387,7 @@ fn save_report(report: &SystemReport) -> Result<String> {
 }
 
 async fn send_to_telegram(filename: &str, report: &SystemReport) -> Result<()> {
-    let bot_token = env::var("TELEGRAM_BOT_TOKEN")?;
-    let chat_id: i64 = env::var("TELEGRAM_CHAT_ID")?.parse()?;
+    let (bot_token, chat_id) = get_telegram_credentials()?;
 
     let bot = Bot::new(bot_token);
     let file = InputFile::file(filename);
@@ -373,6 +400,7 @@ async fn send_to_telegram(filename: &str, report: &SystemReport) -> Result<()> {
         🌐 IP: {} (внешний: {})\n\
         📊 Процессов: {}\n\
         💾 Дисков: {}\n\
+        🖥️ Дисплеев: {}\n\
         📦 Установлено ПО: {}\n\
         ⏱️ Uptime: {}",
         report.hostname,
@@ -383,6 +411,7 @@ async fn send_to_telegram(filename: &str, report: &SystemReport) -> Result<()> {
         report.external_ip,
         report.process_count,
         report.disks.len(),
+        report.display_count,
         report.installed_software_count,
         report.system_uptime_readable
     );
@@ -753,4 +782,152 @@ fn get_installed_software_unix() -> Vec<SoftwareInfo> {
     }
 
     software
+}
+
+// --- Криптография: шифрование токенов ---
+
+mod crypto {
+    use super::*;
+
+    const NONCE_SIZE: usize = 12;
+
+    pub fn encrypt_token(token: &str, password: &str) -> Result<String> {
+        // Генерируем соль для Argon2
+        let salt = SaltString::generate(&mut OsRng);
+
+        // Создаем ключ из пароля через Argon2
+        let argon2 = Argon2::default();
+        let password_hash = argon2
+            .hash_password(password.as_bytes(), &salt)
+            .context("Ошибка хэширования пароля")?;
+
+        // Извлекаем первые 32 байта для AES-256
+        let key_bytes = password_hash.hash.unwrap().as_bytes();
+        let key = &key_bytes[..32];
+
+        // Создаем шифр
+        let cipher = Aes256Gcm::new_from_slice(key)
+            .context("Ошибка создания шифра")?;
+
+        // Генерируем nonce
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // Шифруем
+        let ciphertext = cipher
+            .encrypt(nonce, token.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Ошибка шифрования: {}", e))?;
+
+        // Объединяем: nonce + salt + ciphertext
+        let mut result = Vec::new();
+        result.extend_from_slice(&nonce_bytes);
+        result.extend_from_slice(salt.as_str().as_bytes());
+        result.extend_from_slice(&ciphertext);
+
+        // Кодируем в base64
+        Ok(general_purpose::STANDARD.encode(&result))
+    }
+
+    pub fn decrypt_token(encrypted: &str, password: &str) -> Result<String> {
+        // Декодируем из base64
+        let data = general_purpose::STANDARD
+            .decode(encrypted)
+            .context("Ошибка декодирования base64")?;
+
+        if data.len() < NONCE_SIZE + 22 {
+            return Err(anyhow::anyhow!("Неверный формат зашифрованных данных"));
+        }
+
+        // Извлекаем nonce (первые 12 байт)
+        let nonce_bytes = &data[..NONCE_SIZE];
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        // Извлекаем salt (следующие ~22 байта)
+        let salt_str = std::str::from_utf8(&data[NONCE_SIZE..NONCE_SIZE + 22])
+            .context("Ошибка чтения соли")?;
+        let salt = SaltString::from_b64(salt_str)
+            .map_err(|e| anyhow::anyhow!("Ошибка парсинга соли: {}", e))?;
+
+        // Восстанавливаем ключ
+        let argon2 = Argon2::default();
+        let password_hash = argon2
+            .hash_password(password.as_bytes(), &salt)
+            .context("Ошибка хэширования пароля")?;
+
+        let key_bytes = password_hash.hash.unwrap().as_bytes();
+        let key = &key_bytes[..32];
+
+        // Создаем шифр
+        let cipher = Aes256Gcm::new_from_slice(key)
+            .context("Ошибка создания шифра")?;
+
+        // Расшифровываем
+        let ciphertext = &data[NONCE_SIZE + 22..];
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| anyhow::anyhow!("Ошибка расшифрования: {}", e))?;
+
+        String::from_utf8(plaintext)
+            .context("Ошибка конвертации в UTF-8")
+    }
+}
+
+// --- Работа с зашифрованными токенами ---
+
+fn get_telegram_credentials() -> Result<(String, i64)> {
+    // Проверяем зашифрованные токены
+    if let (Ok(enc_token), Ok(enc_chat_id), Ok(password)) = (
+        env::var("ENCRYPTED_BOT_TOKEN"),
+        env::var("ENCRYPTED_CHAT_ID"),
+        env::var("ENCRYPTION_PASSWORD"),
+    ) {
+        println!("   ℹ Используются зашифрованные учетные данные");
+        let bot_token = crypto::decrypt_token(&enc_token, &password)
+            .context("Не удалось расшифровать токен бота")?;
+        let chat_id_str = crypto::decrypt_token(&enc_chat_id, &password)
+            .context("Не удалось расшифровать Chat ID")?;
+        let chat_id: i64 = chat_id_str.parse()
+            .context("Chat ID должен быть числом")?;
+
+        return Ok((bot_token, chat_id));
+    }
+
+    // Fallback на незашифрованные
+    if let (Ok(bot_token), Ok(chat_id_str)) = (
+        env::var("TELEGRAM_BOT_TOKEN"),
+        env::var("TELEGRAM_CHAT_ID"),
+    ) {
+        println!("   ⚠ Используются НЕЗАШИФРОВАННЫЕ учетные данные!");
+        let chat_id: i64 = chat_id_str.parse()
+            .context("Chat ID должен быть числом")?;
+
+        return Ok((bot_token, chat_id));
+    }
+
+    Err(anyhow::anyhow!("Telegram учетные данные не найдены"))
+}
+
+// --- Сбор информации о дисплеях ---
+
+fn get_displays_info() -> Vec<DisplayInfo> {
+    match display_info::DisplayInfo::all() {
+        Ok(displays) => {
+            displays.iter().enumerate().map(|(idx, display)| {
+                DisplayInfo {
+                    id: display.id,
+                    name: display.name.clone().unwrap_or_else(|| format!("Display {}", idx)),
+                    width: display.width,
+                    height: display.height,
+                    refresh_rate: display.frequency,
+                    is_primary: display.is_primary,
+                    rotation: display.rotation as u32,
+                }
+            }).collect()
+        }
+        Err(e) => {
+            eprintln!("Не удалось получить информацию о дисплеях: {}", e);
+            Vec::new()
+        }
+    }
 }
