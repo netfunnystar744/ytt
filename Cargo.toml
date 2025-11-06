@@ -1,24 +1,29 @@
 [package]
 name = "system_reporter"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
 # Системная информация
 sysinfo = "0.30"
 whoami = "1.5"
+local-ip-address = "0.6"
+
+# Низкоуровневый доступ к Windows
+wmi = "0.15"
 
 # Сериализация (JSON)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# ПРИМЕЧАНИЕ: Дополнительные зависимости закомментированы из-за отсутствия доступа к crates.io
-# Раскомментируйте их при наличии интернет-соединения для полной функциональности
+# Telegram Bot (Асинхронность)
+tokio = { version = "1", features = ["full"] }
+teloxide = { version = "0.12", features = ["macros"] }
+reqwest = { version = "0.11", features = ["multipart"] }
 
-# Низкоуровневый доступ к Windows
-# wmi = "0.15"
+# Обработка ошибок
+anyhow = "1.0"
+thiserror = "1.0"
 
-# Telegram Bot
-# tokio = { version = "1", features = ["full"] }
-# teloxide = { version = "0.12", features = ["macros", "fs"] }
-# local-ip-address = "0.6"
+# Работа с датой и временем
+chrono = "0.4"
