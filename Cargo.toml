@@ -1,0 +1,24 @@
+[package]
+name = "system_reporter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Системная информация
+sysinfo = "0.30"
+whoami = "1.5"
+
+# Сериализация (JSON)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# ПРИМЕЧАНИЕ: Дополнительные зависимости закомментированы из-за отсутствия доступа к crates.io
+# Раскомментируйте их при наличии интернет-соединения для полной функциональности
+
+# Низкоуровневый доступ к Windows
+# wmi = "0.15"
+
+# Telegram Bot
+# tokio = { version = "1", features = ["full"] }
+# teloxide = { version = "0.12", features = ["macros", "fs"] }
+# local-ip-address = "0.6"
