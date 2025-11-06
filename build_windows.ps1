@@ -21,11 +21,19 @@ rustc --version
 cargo --version
 Write-Host ""
 
-Write-Host "[2/4] Очистка предыдущих сборок..." -ForegroundColor Green
+Write-Host "[2/5] Проверка .env файла..." -ForegroundColor Green
+if (Test-Path ".env") {
+    Write-Host "  ✓ .env файл найден - токены будут встроены в exe" -ForegroundColor Green
+} else {
+    Write-Host "  ℹ .env файл не найден - токены нужно будет передавать через переменные окружения" -ForegroundColor Yellow
+}
+Write-Host ""
+
+Write-Host "[3/5] Очистка предыдущих сборок..." -ForegroundColor Green
 cargo clean
 Write-Host ""
 
-Write-Host "[3/4] Сборка Release версии для Windows..." -ForegroundColor Green
+Write-Host "[4/5] Сборка Release версии для Windows..." -ForegroundColor Green
 Write-Host "Это может занять несколько минут..." -ForegroundColor Yellow
 $env:RUSTFLAGS = "-C target-cpu=native"
 cargo build --release
@@ -36,7 +44,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host ""
 
-Write-Host "[4/4] Готово!" -ForegroundColor Green
+Write-Host "[5/5] Готово!" -ForegroundColor Green
 Write-Host ""
 Write-Host "════════════════════════════════════════" -ForegroundColor Cyan
 
@@ -68,5 +76,9 @@ if ($choice -eq 'y' -or $choice -eq 'Y') {
     Write-Host "✓ Создан: system_reporter.exe" -ForegroundColor Green
 }
 
+Write-Host ""
+Write-Host "📌 Примечание:" -ForegroundColor Yellow
+Write-Host "   • Эта версия показывает консольное окно при запуске" -ForegroundColor White
+Write-Host "   • Для скрытого запуска используйте: build_windows_silent.ps1" -ForegroundColor White
 Write-Host ""
 Write-Host "Готово! Для дополнительных опций см. README.md" -ForegroundColor Green

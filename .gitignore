@@ -1,1 +1,31 @@
-/target
+# Rust
+/target/
+Cargo.lock
+
+# System reports
+*.json
+system_report_*.json
+
+# Logs
+*.log
+system_reporter.log
+
+# Environment variables (ВАЖНО!)
+.env
+.env.local
+.env.production
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
