@@ -284,7 +284,7 @@ Get-Content system_reporter.log -Tail 20
 
 ```
 ╔════════════════════════════════════════╗
-║     System Reporter v0.4.0             ║
+║     System Reporter v0.4.1             ║
 ║     Полный сбор системной информации   ║
 ╚════════════════════════════════════════╝
 
@@ -411,7 +411,7 @@ Get-Content system_reporter.log -Tail 20
   ],
 
   "report_generated_at": "2025-01-06T14:30:25+00:00",
-  "reporter_version": "0.4.0"
+  "reporter_version": "0.4.1"
 }
 ```
 

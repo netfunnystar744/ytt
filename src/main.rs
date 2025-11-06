@@ -245,7 +245,7 @@ fn log(msg: &str) {
 #[tokio::main]
 async fn main() -> Result<()> {
     log("╔════════════════════════════════════════╗");
-    log("║     System Reporter v0.4.0             ║");
+    log("║     System Reporter v0.4.1             ║");
     log("║     Полный сбор системной информации   ║");
     log("╚════════════════════════════════════════╝");
     log("");
